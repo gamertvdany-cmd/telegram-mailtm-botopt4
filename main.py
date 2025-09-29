@@ -16,16 +16,18 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))
 OTP_REGEX = re.compile(r"\b(\d{4,8})\b")  # OTP de 4-8 dígitos
 
 # ---------------- Almacenamiento ----------------
-usuarios = {}  # chat_id -> lista de {"email":..., "id":...}
+usuarios = {}  # chat_id -> lista de {"email":..., "mail_id":...}
 seen_messages = {}  # mail_id -> set(message_id) ya procesados
 
 # ---------------- Funciones Privatix ----------------
 def crear_correo_temporal():
+    """Crea un correo temporal y obtiene su mail_id de Privatix."""
     conn = http.client.HTTPSConnection(TEMPMAIL_HOST)
     headers = {
         'x-rapidapi-key': RAPIDAPI_KEY,
         'x-rapidapi-host': TEMPMAIL_HOST
     }
+
     # Elegimos un dominio aleatorio
     conn.request("GET", "/request/domains/", headers=headers)
     res = conn.getresponse()
@@ -36,9 +38,22 @@ def crear_correo_temporal():
     # Generamos correo aleatorio
     nombre = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
     correo = f"{nombre}@{dominio}"
-    return correo
+
+    # Registrar el correo para obtener mail_id
+    conn.request("GET", f"/request/mail/id/{correo}/", headers=headers)
+    res = conn.getresponse()
+    data = res.read()
+    try:
+        resp = json.loads(data)
+        # Privatix normalmente devuelve mail_id en la respuesta
+        mail_id = resp.get("id", correo)  # fallback al correo
+    except:
+        mail_id = correo
+
+    return correo, mail_id
 
 def list_messages(mail_id):
+    """Lista mensajes de un mail_id."""
     conn = http.client.HTTPSConnection(TEMPMAIL_HOST)
     headers = {
         'x-rapidapi-key': RAPIDAPI_KEY,
@@ -54,13 +69,14 @@ def list_messages(mail_id):
         msgs = []
     return msgs
 
-def delete_mail(mail_id):
+def delete_mail(message_id):
+    """Elimina un mensaje por su ID."""
     conn = http.client.HTTPSConnection(TEMPMAIL_HOST)
     headers = {
         'x-rapidapi-key': RAPIDAPI_KEY,
         'x-rapidapi-host': TEMPMAIL_HOST
     }
-    url = f"/request/delete/id/{mail_id}/"
+    url = f"/request/delete/id/{message_id}/"
     conn.request("GET", url, headers=headers)
     res = conn.getresponse()
     data = res.read()
@@ -72,7 +88,7 @@ async def poll_emails(app):
         try:
             for chat_id, correos in usuarios.items():
                 for correo_info in correos:
-                    mail_id = correo_info["id"]
+                    mail_id = correo_info["mail_id"]
                     seen = seen_messages.setdefault(mail_id, set())
                     msgs = list_messages(mail_id)
                     for m in msgs:
@@ -108,10 +124,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    correo = crear_correo_temporal()
-    # Nota: Privatix no da mail_id al crear; en práctica real necesitas crear y obtener mail_id de la API
-    mail_id = correo  # temporal: usar correo como id hasta que tengas mail_id real
-    usuarios.setdefault(chat_id, []).append({"email": correo, "id": mail_id})
+    correo, mail_id = crear_correo_temporal()
+    usuarios.setdefault(chat_id, []).append({"email": correo, "mail_id": mail_id})
     seen_messages[mail_id] = set()
     await update.message.reply_text(f"✅ Nuevo correo creado: {correo}")
 
@@ -134,7 +148,7 @@ async def delete_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for c in correos:
         if c["email"] == correo:
             correos.remove(c)
-            seen_messages.pop(c["id"], None)
+            seen_messages.pop(c["mail_id"], None)
             await update.message.reply_text(f"🗑 Correo eliminado: {correo}")
             return
     await update.message.reply_text("Correo no encontrado.")
@@ -145,7 +159,7 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not correos:
         await update.message.reply_text("No tienes correos.")
         return
-    total = sum(len(seen_messages.get(c["id"], set())) for c in correos)
+    total = sum(len(seen_messages.get(c["mail_id"], set())) for c in correos)
     await update.message.reply_text(f"Mensajes procesados en total: {total}")
 
 # ---------------- Inicialización ----------------
