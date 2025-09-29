@@ -1,4 +1,3 @@
-# main.py
 import os
 import asyncio
 import httpx
@@ -8,19 +7,20 @@ import random
 import string
 import time
 import tempfile
+import imgkit
 from bs4 import BeautifulSoup
 from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ---------------- CONFIG ----------------
 TOKEN = os.environ.get("TOKEN")
-OWNER_ID = os.environ.get("OWNER_ID")  # tu id de Telegram (como string). Solo este usuario puede generar keys.
+OWNER_ID = os.environ.get("OWNER_ID")  # tu Telegram user ID
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))
 DATA_FILE = "data.json"
 OTP_REGEX = re.compile(r"\b(\d{4,8})\b")
 MAILTM_BASE = "https://api.mail.tm"
 
-# ---------------- Utilidades de persistencia ----------------
+# ---------------- Persistencia ----------------
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -35,50 +35,30 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 data = load_data()
-# estructura:
-# data["usuarios"] : chat_id(str) -> list of account dicts {email, token, id}
-# data["keys"] : key_str -> {"days":int, "created":ts, "used_by": chat_id or None, "used_at":ts or None}
-# data["redemptions"]: chat_id(str) -> {"expiry": timestamp}
-
 seen_messages = set()
 
-# ---------------- Mail.tm helpers ----------------
+# ---------------- Mail.tm ----------------
 async def crear_correo_temporal():
     async with httpx.AsyncClient(timeout=30) as client:
-        # dominios
         r = await client.get(f"{MAILTM_BASE}/domains")
-        if r.status_code != 200:
-            print("Mail.tm dominios error:", r.status_code, r.text)
-            return None
         dominios = r.json().get("hydra:member", [])
-        if not dominios:
-            print("No hay dominios en Mail.tm")
-            return None
+        if not dominios: return None
         dominio = dominios[0]["domain"]
 
-        # generar credenciales válidas
         nombre = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         email = f"{nombre}@{dominio}"
-        password = "Temp1234!"  # cumple requisitos básicos
+        password = "Temp1234!"
 
         payload = {"address": email, "password": password}
         r = await client.post(f"{MAILTM_BASE}/accounts", json=payload)
-        if r.status_code not in (200, 201):
-            print("Error creando cuenta:", r.status_code, r.text)
-            return None
+        if r.status_code not in (200,201): return None
 
-        # obtener token
         r = await client.post(f"{MAILTM_BASE}/token", json=payload)
-        if r.status_code != 200:
-            print("Error token:", r.status_code, r.text)
-            return None
+        if r.status_code != 200: return None
         token = r.json().get("token")
 
-        # obtener id
         r = await client.get(f"{MAILTM_BASE}/me", headers={"Authorization": f"Bearer {token}"})
-        if r.status_code != 200:
-            print("Error me:", r.status_code, r.text)
-            return None
+        if r.status_code != 200: return None
         id_ = r.json().get("id")
         return {"email": email, "token": token, "id": id_}
 
@@ -86,33 +66,26 @@ async def list_messages(account):
     async with httpx.AsyncClient(timeout=30) as client:
         headers = {"Authorization": f"Bearer {account['token']}"}
         r = await client.get(f"{MAILTM_BASE}/messages", headers=headers)
-        if r.status_code != 200:
-            print(f"list_messages error {account.get('email')}: {r.status_code} {r.text[:200]}")
-            return []
-        try:
-            return r.json().get("hydra:member", [])
-        except Exception:
-            return []
+        if r.status_code != 200: return []
+        return r.json().get("hydra:member", [])
 
 async def delete_message(account, message_id):
     async with httpx.AsyncClient(timeout=30) as client:
         headers = {"Authorization": f"Bearer {account['token']}"}
         await client.delete(f"{MAILTM_BASE}/messages/{message_id}", headers=headers)
 
-# ---------------- HTML/text helpers ----------------
+# ---------------- HTML a texto ----------------
 def html_to_text(html):
     soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(separator="\n", strip=True)
-    return text
+    return soup.get_text(separator="\n", strip=True)
 
 def extract_otp_from_text(text):
     m = OTP_REGEX.search(text or "")
     return m.group(0) if m else None
 
-# ---------------- License / key helpers ----------------
+# ---------------- Keys ----------------
 def gen_key_string(length=12):
-    alphabet = string.ascii_uppercase + string.digits
-    return ''.join(random.choices(alphabet, k=length))
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 def create_key(days):
     k = gen_key_string(14)
@@ -124,10 +97,8 @@ def create_key(days):
 def redeem_key_for_chat(key, chat_id_str):
     now = int(time.time())
     kinfo = data["keys"].get(key)
-    if not kinfo:
-        return False, "Key no encontrada"
-    if kinfo.get("used_by"):
-        return False, "Key ya usada"
+    if not kinfo: return False, "Key no encontrada"
+    if kinfo.get("used_by"): return False, "Key ya usada"
     days = int(kinfo["days"])
     expiry = now + days * 86400
     data["redemptions"][chat_id_str] = {"expiry": expiry}
@@ -138,8 +109,7 @@ def redeem_key_for_chat(key, chat_id_str):
 
 def is_active(chat_id_str):
     r = data["redemptions"].get(chat_id_str)
-    if not r:
-        return False
+    if not r: return False
     return int(time.time()) < int(r.get("expiry", 0))
 
 def extend_redemption(chat_id_str, days):
@@ -165,73 +135,72 @@ async def poll_emails(app):
     while True:
         try:
             for chat_id_str, accounts in list(data["usuarios"].items()):
-                # Only poll for active users
-                if not is_active(chat_id_str):
-                    continue
+                if not is_active(chat_id_str): continue
                 for acc in accounts:
                     messages = await list_messages(acc)
-                    if messages:
-                        print(f"[DEBUG] {acc['email']} messages_count={len(messages)}")
                     for m in messages:
                         message_id = m.get("id")
-                        if not message_id or message_id in seen_messages:
-                            continue
+                        if not message_id or message_id in seen_messages: continue
                         seen_messages.add(message_id)
 
-                        # Prefer text, else html -> text
                         text = m.get("text") or ""
                         html = m.get("html") or ""
                         subject = m.get("subject") or ""
-                        if text:
-                            body = text
-                            source = "text"
-                        elif html:
-                            body = html_to_text(html)
-                            source = "html->text"
-                        else:
-                            body = ""
-                            source = "empty"
-
+                        body = text if text else html_to_text(html)
                         otp = extract_otp_from_text(body)
+                        msg_text = f"📧 `{acc['email']}`\nAsunto: {subject}\n\n"
                         if otp:
-                            send_text = f"📲 OTP recibido en `{acc['email']}`:\n`{otp}`\n_origen: {source}_"
-                        else:
-                            snippet = (body.strip()[:1500] + "...") if body and len(body) > 1500 else (body or "(sin cuerpo legible)")
-                            send_text = f"📧 Nuevo mensaje en `{acc['email']}`\nAsunto: {subject}\n\n{snippet}\n\n_origen: {source}_"
+                            msg_text = f"📲 OTP detectado: `{otp}`\n\n" + msg_text
+                        msg_text += body[:1500] + ("..." if len(body)>1500 else "")
 
-                        try:
-                            await app.bot.send_message(chat_id=int(chat_id_str), text=send_text, parse_mode="Markdown")
-                            # If html present, also send raw html file for inspection
-                            if html:
-                                with tempfile.NamedTemporaryFile("w+", suffix=".html", delete=False, encoding="utf-8") as tf2:
-                                    tf2.write(html)
-                                    path_html = tf2.name
-                                await app.bot.send_document(chat_id=int(chat_id_str), document=InputFile(path_html), filename=f"{acc['email']}_raw.html")
+                        # Enviar como imagen (HTML completo)
+                        if html:
+                            with tempfile.NamedTemporaryFile("w+", suffix=".html", delete=False, encoding="utf-8") as tf:
+                                tf.write(html)
+                                html_file = tf.name
+                            png_file = html_file.replace(".html",".png")
+                            try:
+                                imgkit.from_file(html_file, png_file)
+                                await app.bot.send_photo(chat_id=int(chat_id_str), photo=InputFile(png_file))
+                            except Exception as e:
+                                print("Error generando imagen HTML:", e)
+                            finally:
+                                for f in [html_file, png_file]:
+                                    if os.path.exists(f): os.remove(f)
+                        # Enviar texto también
+                        await app.bot.send_message(chat_id=int(chat_id_str), text=msg_text, parse_mode="Markdown")
+
+                        # adjuntos
+                        attachments = m.get("attachments", [])
+                        for att in attachments:
+                            att_url = att.get("url")
+                            att_name = att.get("filename", "file")
+                            if att_url:
                                 try:
-                                    os.remove(path_html)
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            print("Error sending Telegram:", e)
+                                    async with httpx.AsyncClient(timeout=30) as client:
+                                        r = await client.get(att_url, headers={"Authorization": f"Bearer {acc['token']}"})
+                                        if r.status_code == 200:
+                                            content = r.content
+                                            if att_name.lower().endswith((".jpg",".jpeg",".png",".gif")):
+                                                await app.bot.send_photo(chat_id=int(chat_id_str), photo=content, caption=att_name)
+                                            else:
+                                                await app.bot.send_document(chat_id=int(chat_id_str), document=content, filename=att_name)
+                                except Exception as e:
+                                    print("Error adjunto:", e)
 
-                        # delete message from server
-                        try:
-                            await delete_message(acc, message_id)
-                        except Exception:
-                            pass
+                        await delete_message(acc, message_id)
         except Exception as e:
-            print("Error in poll_emails:", e)
+            print("Error en poller:", e)
         await asyncio.sleep(POLL_INTERVAL)
 
-# ---------------- Telegram command handlers ----------------
+# ---------------- Comandos ----------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id_str = str(update.effective_chat.id)
     data["usuarios"].setdefault(chat_id_str, data["usuarios"].get(chat_id_str, []))
     save_data(data)
     await update.message.reply_text(
-        "✅ Bot listo.\n"
-        "Si ya tienes key, canjeala con /redeem <KEY>\n"
-        "Comandos:\n/redeem <KEY>\n/status\n/new (crear correo, requiere key activa)\n/list\n/delete <correo>\n/inbox"
+        "✅ Bot listo.\nSi tienes key, canjeala con /redeem <KEY>\n"
+        "Comandos usuario:\n/redeem <KEY>\n/status\n/new\n/list\n/delete <correo>\n/inbox\n/checkadmin"
     )
 
 async def redeem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -255,15 +224,14 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("🔒 No tienes acceso activo. Canjea una key con /redeem <KEY>")
 
-# user commands guarded by license
 async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id_str = str(update.effective_chat.id)
     if not is_active(chat_id_str):
-        await update.message.reply_text("🔒 Necesitas una key válida. Pide una o canjea con /redeem <KEY>")
+        await update.message.reply_text("🔒 Necesitas una key válida.")
         return
     account = await crear_correo_temporal()
     if not account:
-        await update.message.reply_text("❌ Error creando correo temporal. Revisa logs.")
+        await update.message.reply_text("❌ Error creando correo temporal.")
         return
     data["usuarios"].setdefault(chat_id_str, []).append(account)
     save_data(data)
@@ -273,7 +241,7 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id_str = str(update.effective_chat.id)
     accounts = data["usuarios"].get(chat_id_str, [])
     if not accounts:
-        await update.message.reply_text("No tienes correos. Usa /new (requiere key activa).")
+        await update.message.reply_text("No tienes correos.")
         return
     text = "\n".join([a["email"] for a in accounts])
     await update.message.reply_text(f"📬 Tus correos:\n{text}")
@@ -302,12 +270,19 @@ async def inbox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total += len(msgs)
     await update.message.reply_text(f"Mensajes en bandeja: {total}")
 
-# ---------------- Admin commands ----------------
+# ---------------- Admin ----------------
 def is_owner(update):
     try:
         return str(update.effective_user.id) == str(OWNER_ID)
     except Exception:
         return False
+
+async def checkadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if str(user_id) == str(OWNER_ID):
+        await update.message.reply_text(f"✅ Eres el admin. Tu ID: {user_id}")
+    else:
+        await update.message.reply_text(f"❌ No eres el admin. Tu ID: {user_id}")
 
 async def genkey_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
@@ -316,70 +291,3 @@ async def genkey_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usa: /genkey <dias>")
         return
-    days = int(context.args[0])
-    key = create_key(days)
-    await update.message.reply_text(f"🔑 Key generada: `{key}` válida por {days} días", parse_mode="Markdown")
-
-async def listkeys_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update):
-        await update.message.reply_text("Solo el admin puede usar este comando.")
-        return
-    lines = []
-    for k, v in data["keys"].items():
-        used = v.get("used_by")
-        lines.append(f"{k} — {v['days']}d — used_by={used}")
-    await update.message.reply_text("Keys:\n" + ("\n".join(lines) if lines else "(ninguna)"))
-
-async def revoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update):
-        await update.message.reply_text("Solo el admin puede usar este comando.")
-        return
-    if not context.args:
-        await update.message.reply_text("Usa: /revoke <chat_id>")
-        return
-    chat_id_str = str(context.args[0])
-    ok = revoke_chat(chat_id_str)
-    await update.message.reply_text("✅ Revocado" if ok else "No encontrado")
-
-async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update):
-        await update.message.reply_text("Solo el admin puede usar este comando.")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usa: /extend <chat_id> <dias>")
-        return
-    chat_id_str = str(context.args[0])
-    days = int(context.args[1])
-    new_exp = extend_redemption(chat_id_str, days)
-    await update.message.reply_text(f"✅ Expiración extendida hasta {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(new_exp))}")
-
-# ---------------- Inicialización ----------------
-if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO)
-
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # user commands
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("redeem", redeem_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("new", new_email))
-    app.add_handler(CommandHandler("list", list_cmd))
-    app.add_handler(CommandHandler("delete", delete_cmd))
-    app.add_handler(CommandHandler("inbox", inbox_cmd))
-
-    # admin
-    app.add_handler(CommandHandler("genkey", genkey_cmd))
-    app.add_handler(CommandHandler("listkeys", listkeys_cmd))
-    app.add_handler(CommandHandler("revoke", revoke_cmd))
-    app.add_handler(CommandHandler("extend", extend_cmd))
-
-    # start poller in background
-    async def start_polling_background():
-        asyncio.create_task(poll_emails(app))
-        print("Poller iniciado en background...")
-
-    asyncio.get_event_loop().create_task(start_polling_background())
-    print("Bot iniciado y poller corriendo...")
-    app.run_polling()
