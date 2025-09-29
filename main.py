@@ -12,7 +12,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TOKEN = os.environ.get("TOKEN")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 TEMPMAIL_HOST = "privatix-temp-mail-v1.p.rapidapi.com"
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))  # segundos entre consultas
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))
 OTP_REGEX = re.compile(r"\b(\d{4,8})\b")  # OTP de 4-8 dígitos
 
 # ---------------- Almacenamiento ----------------
@@ -131,22 +131,22 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Mensajes procesados en total: {total}")
 
 # ---------------- Inicialización ----------------
+async def on_startup(app):
+    asyncio.create_task(poll_emails(app))
+    print("Poller de emails iniciado en background...")
+
 if __name__ == "__main__":
     import logging
-
     logging.basicConfig(level=logging.INFO)
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Añadir comandos
+    # Añadir handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_email))
     app.add_handler(CommandHandler("list", list_emails))
     app.add_handler(CommandHandler("delete", delete_email))
     app.add_handler(CommandHandler("inbox", inbox))
 
-    # Iniciar polling de emails en background
-    asyncio.create_task(poll_emails(app))
-
-    print("Bot iniciado y poller corriendo...")
-    app.run_polling()
+    # Ejecutar bot y lanzar poller al inicio
+    app.run_polling(post_init=on_startup)
