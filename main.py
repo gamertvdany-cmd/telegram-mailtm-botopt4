@@ -2,6 +2,7 @@ import os
 import asyncio
 import httpx
 import json
+import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -9,34 +10,41 @@ TOKEN = os.environ.get("TOKEN")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))
 OTP_REGEX = r"\b(\d{4,8})\b"
 
-usuarios = {}  # chat_id -> list of {"email":..., "token":..., "id":...}
-seen_messages = {}  # message_id ya procesados
+DATA_FILE = "usuarios.json"
 
 MAILTM_BASE = "https://api.mail.tm"
+
+# ---------------- Cargar y guardar ----------------
+def cargar_usuarios():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def guardar_usuarios(usuarios):
+    with open(DATA_FILE, "w") as f:
+        json.dump(usuarios, f)
+
+usuarios = cargar_usuarios()  # chat_id -> lista de cuentas
+seen_messages = {}  # message_id ya procesados
 
 # ---------------- Funciones Mail.tm ----------------
 async def crear_correo_temporal():
     async with httpx.AsyncClient() as client:
-        # Obtener dominio disponible
         r = await client.get(f"{MAILTM_BASE}/domains")
         dominios = r.json()["hydra:member"]
         dominio = dominios[0]["domain"] if dominios else "mail.tm"
 
-        # Generar email aleatorio
         nombre = ''.join([chr(c) for c in os.urandom(6)])
         email = f"{nombre}@{dominio}"
-        password = "Temp1234!"  # password para API
+        password = "Temp1234!"
 
-        # Crear cuenta
         payload = {"address": email, "password": password}
         r = await client.post(f"{MAILTM_BASE}/accounts", json=payload)
         if r.status_code not in [200, 201]:
-            return None, None
-
-        # Obtener token de sesión
+            return None
         r = await client.post(f"{MAILTM_BASE}/token", json=payload)
         token = r.json()["token"]
-        # Obtener id de la cuenta
         r = await client.get(f"{MAILTM_BASE}/me", headers={"Authorization": f"Bearer {token}"})
         id_ = r.json()["id"]
         return {"email": email, "token": token, "id": id_}
@@ -68,7 +76,6 @@ async def poll_emails(app):
                             continue
                         seen_messages[message_id] = True
                         body = m.get("text") or m.get("html") or ""
-                        import re
                         match = re.search(OTP_REGEX, body)
                         otp = match.group(0) if match else None
                         texto = f"📲 Nuevo OTP en {acc['email']}:\n{otp}" if otp else f"📧 Nuevo mensaje en {acc['email']}:\n{body[:300]}"
@@ -83,9 +90,9 @@ async def poll_emails(app):
 
 # ---------------- Comandos Telegram ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in usuarios:
-        usuarios[chat_id] = []
+    chat_id = str(update.effective_chat.id)
+    usuarios.setdefault(chat_id, [])
+    guardar_usuarios(usuarios)
     await update.message.reply_text(
         "✅ Bot iniciado.\n"
         "Usa /new para crear un correo temporal.\n"
@@ -95,16 +102,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def new_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = str(update.effective_chat.id)
     account = await crear_correo_temporal()
     if not account:
         await update.message.reply_text("❌ Error creando correo temporal")
         return
     usuarios.setdefault(chat_id, []).append(account)
+    guardar_usuarios(usuarios)
     await update.message.reply_text(f"✅ Nuevo correo creado: {account['email']}")
 
 async def list_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = str(update.effective_chat.id)
     accounts = usuarios.get(chat_id, [])
     if not accounts:
         await update.message.reply_text("No tienes correos. Usa /new.")
@@ -113,7 +121,7 @@ async def list_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📬 Tus correos:\n{texto}")
 
 async def delete_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = str(update.effective_chat.id)
     accounts = usuarios.get(chat_id, [])
     if not context.args:
         await update.message.reply_text("Usa: /delete <correo>")
@@ -122,12 +130,13 @@ async def delete_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for acc in accounts:
         if acc["email"] == correo:
             accounts.remove(acc)
+            guardar_usuarios(usuarios)
             await update.message.reply_text(f"🗑 Correo eliminado: {correo}")
             return
     await update.message.reply_text("Correo no encontrado.")
 
 async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = str(update.effective_chat.id)
     accounts = usuarios.get(chat_id, [])
     if not accounts:
         await update.message.reply_text("No tienes correos.")
