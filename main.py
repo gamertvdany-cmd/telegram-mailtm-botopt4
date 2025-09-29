@@ -6,15 +6,14 @@ import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# ---------------- CONFIG ----------------
 TOKEN = os.environ.get("TOKEN")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))
-OTP_REGEX = r"\b(\d{4,8})\b"
-
+OTP_REGEX = r"\b(\d{4,8})\b"  # OTP de 4 a 8 dígitos
 DATA_FILE = "usuarios.json"
-
 MAILTM_BASE = "https://api.mail.tm"
 
-# ---------------- Cargar y guardar ----------------
+# ---------------- Persistencia ----------------
 def cargar_usuarios():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
@@ -157,7 +156,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("delete", delete_email))
     app.add_handler(CommandHandler("inbox", inbox))
 
-    # Poller en background
     async def start_polling_background():
         asyncio.create_task(poll_emails(app))
         print("Poller iniciado en background...")
