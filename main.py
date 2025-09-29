@@ -5,6 +5,7 @@ import json
 import re
 import random
 import string
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -60,7 +61,7 @@ async def crear_correo_temporal():
             print("❌ Error obteniendo token:", r.status_code, r.text)
             return None
         token = r.json().get("token")
-        print(f"✅ Token obtenido: {token[:10]}...")  # mostrar solo inicio
+        print(f"✅ Token obtenido: {token[:10]}...")
 
         # Obtener id
         r = await client.get(f"{MAILTM_BASE}/me", headers={"Authorization": f"Bearer {token}"})
@@ -99,14 +100,27 @@ async def poll_emails(app):
                         if message_id in seen_messages:
                             continue
                         seen_messages[message_id] = True
-                        body = m.get("text") or m.get("html") or ""
+
+                        # Parsear HTML si existe
+                        html_content = m.get("html", "")
+                        text_content = m.get("text", "")
+                        if html_content:
+                            soup = BeautifulSoup(html_content, "html.parser")
+                            body = soup.get_text()
+                        else:
+                            body = text_content
+
+                        # Buscar OTP
                         match = re.search(OTP_REGEX, body)
                         otp = match.group(0) if match else None
+
                         texto = f"📲 Nuevo OTP en {acc['email']}:\n{otp}" if otp else f"📧 Nuevo mensaje en {acc['email']}:\n{body[:300]}"
+
                         try:
                             await app.bot.send_message(chat_id=chat_id, text=texto)
                         except Exception as e:
                             print("Error enviando Telegram:", e)
+
                         await delete_message(acc, message_id)
         except Exception as e:
             print("Error en poll_emails:", e)
