@@ -12,12 +12,12 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 TOKEN = os.environ.get("TOKEN")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 TEMPMAIL_HOST = "privatix-temp-mail-v1.p.rapidapi.com"
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 10))  # segundos entre consultas
 OTP_REGEX = re.compile(r"\b(\d{4,8})\b")  # OTP de 4-8 dígitos
 
 # ---------------- Almacenamiento ----------------
-usuarios = {}  # chat_id -> lista de correos
-seen_messages = {}  # email -> set(mail_id) procesados
+usuarios = {}        # chat_id -> lista de correos
+seen_messages = {}   # email -> set(mail_id) procesados
 
 # ---------------- Utilidades ----------------
 def generar_correo_temporal():
@@ -84,7 +84,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in usuarios:
         usuarios[chat_id] = []
     await update.message.reply_text(
-        "✅ Bot iniciado.\nUsa /new para crear un nuevo correo temporal.\n"
+        "✅ Bot iniciado.\n"
+        "Usa /new para crear un nuevo correo temporal.\n"
         "Usa /list para ver tus correos.\n"
         "Usa /delete <correo> para eliminar uno.\n"
         "Recibirás automáticamente los OTP/mensajes de tus correos."
@@ -130,20 +131,22 @@ async def inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Mensajes procesados en total: {total}")
 
 # ---------------- Inicialización ----------------
-async def main():
-    if not TOKEN or not RAPIDAPI_KEY:
-        print("ERROR: define TOKEN y RAPIDAPI_KEY")
-        return
+if __name__ == "__main__":
+    import logging
+
+    logging.basicConfig(level=logging.INFO)
+
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # Añadir comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_email))
     app.add_handler(CommandHandler("list", list_emails))
     app.add_handler(CommandHandler("delete", delete_email))
     app.add_handler(CommandHandler("inbox", inbox))
-    # iniciar poller en background
-    asyncio.create_task(poll_emails(app))
-    print("Bot iniciado y poller corriendo...")
-    await app.run_polling()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Iniciar polling de emails en background
+    asyncio.create_task(poll_emails(app))
+
+    print("Bot iniciado y poller corriendo...")
+    app.run_polling()
